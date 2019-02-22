@@ -10,10 +10,10 @@ Downloading mp3 and video from youtube in an easy way.
 ffmpeg included version 3.3.2
 ffprobe included version 3.3.2
 youtube-dl included version 2019.02.18
-##Changelog
+## Changelog
 - v1.1 merged scripts into one and start writing linux bash script
 - v1 separate script for video and mp3
-##TODO
+# TODO
 - create C++ version with pharser txt list of videos
     * ...
     * ...
