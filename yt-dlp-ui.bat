@@ -1,18 +1,15 @@
 @echo off
 :menu
 cls
-echo ����������������������������������������Ŀ
-echo �  Easy yt-dlp video/mp3 downloader  �
-echo �  Author: Biggy1606                     �
-echo �  bigoscloud.xyz                        �
-echo ����������������������������������������Ĵ
-echo �                                        �
-echo �[1] Download MP3 (bestaudio)            �
-echo �[2] Download VIDEO (bestvideo)          �
-echo �[u] Update yt-dlp                   �
-echo �[q] Quit                                �
-echo �                                        �
-echo ������������������������������������������
+echo Easy yt-dlp video/mp3 downloader
+echo Author: Biggy1606
+echo bigoscloud.com
+echo 
+echo [1] Download MP3 (bestaudio)
+echo [2] Download VIDEO (bestvideo)
+echo [u] Update yt-dlp
+echo [q] Quit
+echo 
 set /p selection=Select: 
 if %selection% == 1 ( goto audio )
 if %selection% == 2 ( goto video )
