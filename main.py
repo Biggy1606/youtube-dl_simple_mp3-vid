@@ -1,332 +1,392 @@
-import subprocess
+from __future__ import annotations
+
+import logging
 import os
 import platform
-import requests
-import tkinter as tk
-from tkinter import ttk, messagebox
-from pathlib import Path
+import shutil
+import subprocess
+import tarfile
 import threading
 import zipfile
-import tarfile
+from pathlib import Path
+from tkinter import filedialog
+from typing import Callable
+
+import customtkinter as ctk
+import requests
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+APP_DIR = Path(__file__).resolve().parent
+SYSTEM = platform.system().lower()
+MACHINE = platform.machine().lower()
+
+EXE_SUFFIX = ".exe" if SYSTEM == "windows" else ""
+YT_DLP_BIN = APP_DIR / f"yt-dlp{EXE_SUFFIX}"
+FFMPEG_BIN = APP_DIR / f"ffmpeg{EXE_SUFFIX}"
+FFPROBE_BIN = APP_DIR / f"ffprobe{EXE_SUFFIX}"
+
+DEFAULT_OUTPUT_DIR = APP_DIR / "download"
+
+YT_DLP_PARAMS: dict[str, list[str]] = {
+    "audio": ["-x", "--audio-format", "mp3", "-f", "bestaudio"],
+    "video": ["-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]"],
+}
+
+FFMPEG_URLS: dict[str, str] = {
+    "windows": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+    "linux": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
+    "darwin": "https://evermeet.cx/ffmpeg/getrelease/zip",
+}
+
+REQUEST_TIMEOUT = 30  # seconds for connection timeout
 
 
-class DownloaderApp:
-    YT_DLP_PARAMS = {
-        "audio": "-x --audio-format mp3 -f bestaudio",
-        "video": "-f bestvideo+bestaudio",
-    }
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _download_file(url: str, dest: Path, progress_cb: Callable[[float], None] | None = None) -> None:
+    """Stream-download *url* to *dest* with optional progress callback (0..1)."""
+    resp = requests.get(url, stream=True, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    total = int(resp.headers.get("content-length", 0))
+    downloaded = 0
+    with open(dest, "wb") as fh:
+        for chunk in resp.iter_content(chunk_size=65_536):
+            fh.write(chunk)
+            downloaded += len(chunk)
+            if progress_cb and total:
+                progress_cb(downloaded / total)
+    if progress_cb:
+        progress_cb(1.0)
 
-    def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("Downloader Tool")
-        self.root.geometry("400x320")
-        self.root.minsize(400, 320)
 
-        # Configure grid weights to make window dynamic
-        self.root.grid_rowconfigure(0, weight=1)
-        self.root.grid_columnconfigure(0, weight=1)
+def _set_executable(path: Path) -> None:
+    if SYSTEM != "windows":
+        os.chmod(path, 0o755)
 
-        # Create main frame
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        main_frame.grid_columnconfigure(1, weight=1)
 
-        # Create radio buttons for download type at the top
-        self.download_type = tk.StringVar(value="audio")
-        audio_radio = ttk.Radiobutton(
-            main_frame,
-            text="Download MP3 (best audio)",
-            variable=self.download_type,
-            value="audio",
+# ---------------------------------------------------------------------------
+# Application
+# ---------------------------------------------------------------------------
+ctk.set_appearance_mode("System")
+ctk.set_default_color_theme("blue")
+
+
+class DownloaderApp(ctk.CTk):
+    """Modern yt-dlp GUI — works identically on Windows & Linux."""
+
+    WIDTH = 560
+    HEIGHT = 520
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.title("Media Downloader")
+        self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
+        self.minsize(480, 480)
+        self.resizable(True, True)
+
+        self._build_ui()
+        self._check_tools()
+
+    # ── UI construction ────────────────────────────────────────────
+    def _build_ui(self) -> None:
+        self.grid_rowconfigure(2, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        pad = {"padx": 16, "pady": (8, 0)}
+
+        # ── Section: Format ────────────────────────────────────────
+        fmt_frame = ctk.CTkFrame(self, corner_radius=10)
+        fmt_frame.grid(row=0, column=0, sticky="ew", **pad)
+        fmt_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(fmt_frame, text="Format", font=ctk.CTkFont(size=14, weight="bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 4)
         )
-        video_radio = ttk.Radiobutton(
-            main_frame,
-            text="Download VIDEO (best video max 1080p)",
-            variable=self.download_type,
-            value="video",
-        )
-        audio_radio.grid(row=0, column=0, columnspan=2, pady=5, padx=10, sticky=tk.W)
-        video_radio.grid(row=1, column=0, columnspan=2, pady=5, padx=10, sticky=tk.W)
 
-        # Create URL entry field with validation
-        url_label = ttk.Label(main_frame, text="URL:")
-        url_label.grid(row=2, column=0, pady=5, padx=5, sticky=tk.W)
-        self.url_entry = ttk.Entry(main_frame, width=40)
-        self.url_entry.grid(row=2, column=1, pady=5, padx=5, sticky=(tk.W, tk.E))
-        self.url_entry.bind("<KeyRelease>", self.validate_url)
+        self._download_type = ctk.StringVar(value="audio")
+        ctk.CTkRadioButton(
+            fmt_frame, text="MP3  (best audio)", variable=self._download_type, value="audio"
+        ).grid(row=1, column=0, padx=(16, 8), pady=4, sticky="w")
+        ctk.CTkRadioButton(
+            fmt_frame, text="Video  (best up to 1080p)", variable=self._download_type, value="video"
+        ).grid(row=1, column=1, padx=8, pady=(4, 10), sticky="w")
 
-        # Create path entry field
-        path_label = ttk.Label(main_frame, text="Path (empty = app location):")
-        path_label.grid(row=3, column=0, pady=5, padx=5, sticky=tk.W)
-        self.path_entry = ttk.Entry(main_frame, width=40)
-        self.path_entry.grid(row=3, column=1, pady=5, padx=5, sticky=(tk.W, tk.E))
+        # ── Section: Download ──────────────────────────────────────
+        dl_frame = ctk.CTkFrame(self, corner_radius=10)
+        dl_frame.grid(row=1, column=0, sticky="ew", **pad)
+        dl_frame.grid_columnconfigure(1, weight=1)
 
-        # Create download button
-        self.download_button = ttk.Button(
-            main_frame, text="Download", command=self.start_download, state="disabled"
-        )
-        self.download_button.grid(
-            row=4, column=0, columnspan=2, pady=10, padx=10, sticky=(tk.W, tk.E)
+        ctk.CTkLabel(dl_frame, text="Download", font=ctk.CTkFont(size=14, weight="bold")).grid(
+            row=0, column=0, columnspan=3, sticky="w", padx=12, pady=(10, 4)
         )
 
-        # Add separator
-        separator = ttk.Separator(main_frame, orient="horizontal")
-        separator.grid(row=5, column=0, columnspan=2, pady=10, sticky=(tk.W, tk.E))
+        ctk.CTkLabel(dl_frame, text="URL").grid(row=1, column=0, padx=(12, 4), pady=4, sticky="w")
+        self._url_entry = ctk.CTkEntry(dl_frame, placeholder_text="Paste video or playlist URL")
+        self._url_entry.grid(row=1, column=1, columnspan=2, padx=(4, 12), pady=4, sticky="ew")
+        self._url_entry.bind("<KeyRelease>", self._on_url_change)
 
-        # Create buttons
-        self.ffmpeg_button = ttk.Button(
-            main_frame,
-            text="Download/Update FFmpeg",
-            command=self.start_ffmpeg_download,
+        ctk.CTkLabel(dl_frame, text="Save to").grid(row=2, column=0, padx=(12, 4), pady=4, sticky="w")
+        self._path_entry = ctk.CTkEntry(dl_frame, placeholder_text=str(DEFAULT_OUTPUT_DIR))
+        self._path_entry.grid(row=2, column=1, padx=(4, 4), pady=4, sticky="ew")
+        self._browse_btn = ctk.CTkButton(dl_frame, text="Browse", width=70, command=self._browse_path)
+        self._browse_btn.grid(row=2, column=2, padx=(0, 12), pady=4)
+
+        self._download_btn = ctk.CTkButton(
+            dl_frame, text="Download", command=self._start_download, state="disabled",
+            height=36, font=ctk.CTkFont(size=14, weight="bold"),
         )
-        self.ffmpeg_button.grid(
-            row=6, column=0, columnspan=2, pady=10, padx=10, sticky=(tk.W, tk.E)
+        self._download_btn.grid(row=3, column=0, columnspan=3, padx=12, pady=(8, 4), sticky="ew")
+
+        self._dl_progress = ctk.CTkProgressBar(dl_frame, height=6)
+        self._dl_progress.grid(row=4, column=0, columnspan=3, padx=12, pady=(0, 10), sticky="ew")
+        self._dl_progress.set(0)
+
+        # ── Section: Log / Status ──────────────────────────────────
+        log_frame = ctk.CTkFrame(self, corner_radius=10)
+        log_frame.grid(row=2, column=0, sticky="nsew", **pad)
+        log_frame.grid_rowconfigure(1, weight=1)
+        log_frame.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(log_frame, text="Status", font=ctk.CTkFont(size=14, weight="bold")).grid(
+            row=0, column=0, sticky="w", padx=12, pady=(10, 4)
         )
 
-        self.ytdlp_button = ttk.Button(
-            main_frame,
-            text="Download/Update yt-dlp",
-            command=self.start_ytdlp_download,
-        )
-        self.ytdlp_button.grid(
-            row=7, column=0, columnspan=2, pady=10, padx=10, sticky=(tk.W, tk.E)
-        )
+        self._log_box = ctk.CTkTextbox(log_frame, height=100, state="disabled", font=ctk.CTkFont(size=12))
+        self._log_box.grid(row=1, column=0, padx=12, pady=(0, 10), sticky="nsew")
 
-    def validate_url(self, event=None):
-        if self.url_entry.get().strip():
-            self.download_button["state"] = "normal"
+        # ── Section: Tools ─────────────────────────────────────────
+        tools_frame = ctk.CTkFrame(self, corner_radius=10)
+        tools_frame.grid(row=3, column=0, sticky="ew", padx=16, pady=(8, 16))
+        tools_frame.grid_columnconfigure((0, 1), weight=1)
+
+        self._ffmpeg_btn = ctk.CTkButton(tools_frame, text="Install / Update FFmpeg", command=self._start_ffmpeg_download)
+        self._ffmpeg_btn.grid(row=0, column=0, padx=(12, 6), pady=10, sticky="ew")
+
+        self._ytdlp_btn = ctk.CTkButton(tools_frame, text="Install / Update yt-dlp", command=self._start_ytdlp_download)
+        self._ytdlp_btn.grid(row=0, column=1, padx=(6, 12), pady=10, sticky="ew")
+
+        self._ffmpeg_status = ctk.CTkLabel(tools_frame, text="", font=ctk.CTkFont(size=11))
+        self._ffmpeg_status.grid(row=1, column=0, padx=12, pady=(0, 8))
+
+        self._ytdlp_status = ctk.CTkLabel(tools_frame, text="", font=ctk.CTkFont(size=11))
+        self._ytdlp_status.grid(row=1, column=1, padx=12, pady=(0, 8))
+
+    # ── Tool presence check ────────────────────────────────────────
+    def _check_tools(self) -> None:
+        if FFMPEG_BIN.exists():
+            self._ffmpeg_status.configure(text="Installed", text_color="green")
         else:
-            self.download_button["state"] = "disabled"
+            self._ffmpeg_status.configure(text="Not found", text_color="orange")
 
-    def start_download(self):
-        self.download_button["state"] = "disabled"
-        self.download_button["text"] = "Downloading ⟳"
-        url = self.url_entry.get().strip()
-        output_path = self.path_entry.get().strip() or "./download"
-        download_type = self.download_type.get()
+        if YT_DLP_BIN.exists():
+            self._ytdlp_status.configure(text="Installed", text_color="green")
+        else:
+            self._ytdlp_status.configure(text="Not found", text_color="orange")
 
-        def download_thread():
+    # ── Logging helpers ────────────────────────────────────────────
+    def _log(self, msg: str) -> None:
+        """Append *msg* to the status log (thread-safe via after)."""
+        def _append() -> None:
+            self._log_box.configure(state="normal")
+            self._log_box.insert("end", msg + "\n")
+            self._log_box.see("end")
+            self._log_box.configure(state="disabled")
+        self.after(0, _append)
+
+    def _set_progress(self, value: float) -> None:
+        self.after(0, lambda: self._dl_progress.set(value))
+
+    # ── URL validation ─────────────────────────────────────────────
+    def _on_url_change(self, _event: object = None) -> None:
+        has_text = bool(self._url_entry.get().strip())
+        self._download_btn.configure(state="normal" if has_text else "disabled")
+
+    # ── Path browser ───────────────────────────────────────────────
+    def _browse_path(self) -> None:
+        chosen = filedialog.askdirectory(title="Choose download folder")
+        if chosen:
+            self._path_entry.delete(0, "end")
+            self._path_entry.insert(0, chosen)
+
+    # ── Generic threaded task runner ───────────────────────────────
+    def _run_in_thread(self, target: Callable[[], None]) -> None:
+        threading.Thread(target=target, daemon=True).start()
+
+    # ── Media download ─────────────────────────────────────────────
+    def _start_download(self) -> None:
+        url = self._url_entry.get().strip()
+        if not url:
+            return
+        output_dir = self._path_entry.get().strip() or str(DEFAULT_OUTPUT_DIR)
+        dl_type = self._download_type.get()
+
+        self._download_btn.configure(state="disabled", text="Downloading...")
+        self._dl_progress.set(0)
+
+        def _task() -> None:
             try:
-                # Create download directory if it doesn't exist
-                os.makedirs(output_path, exist_ok=True)
+                if not YT_DLP_BIN.exists():
+                    self._log("yt-dlp not found — install it first.")
+                    return
 
-                # Build command
-                cmd = ["./yt-dlp"]
-                cmd.extend(self.YT_DLP_PARAMS[download_type].split())
-                cmd.extend(
-                    [
-                        "-o",
-                        os.path.join(output_path, "%(title)s-%(abr)sKbps.%(ext)s"),
-                        url,
-                    ]
+                os.makedirs(output_dir, exist_ok=True)
+
+                cmd = [str(YT_DLP_BIN)]
+                cmd.extend(YT_DLP_PARAMS[dl_type])
+                cmd.extend([
+                    "--ffmpeg-location", str(APP_DIR),
+                    "--newline",
+                    "-o", os.path.join(output_dir, "%(title)s.%(ext)s"),
+                    url,
+                ])
+
+                self._log(f"Starting {dl_type} download...")
+                log.info("Running: %s", " ".join(cmd))
+
+                creation_flags = subprocess.CREATE_NO_WINDOW if SYSTEM == "windows" else 0
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    creationflags=creation_flags,
                 )
 
-                subprocess.run(cmd, check=True)
+                for line in proc.stdout:  # type: ignore[union-attr]
+                    line = line.strip()
+                    if not line:
+                        continue
+                    self._log(line)
+                    # Parse yt-dlp progress like "[download]  45.2% ..."
+                    if "[download]" in line and "%" in line:
+                        try:
+                            pct = float(line.split("%")[0].split()[-1]) / 100
+                            self._set_progress(pct)
+                        except (ValueError, IndexError):
+                            pass
 
-                self.root.after(
-                    0, lambda: messagebox.showinfo("Success", "Download completed!")
-                )
-            except Exception as error:
-                self.root.after(
-                    0, lambda error=error: messagebox.showerror("Error", str(error))
-                )
+                proc.wait()
+                if proc.returncode == 0:
+                    self._log("Download completed successfully.")
+                    self._set_progress(1.0)
+                else:
+                    self._log(f"yt-dlp exited with code {proc.returncode}.")
+
+            except Exception as exc:
+                log.exception("Download failed")
+                self._log(f"Error: {exc}")
             finally:
-                self.root.after(
-                    0,
-                    lambda: self.download_button.configure(
-                        state="normal", text="Download"
-                    ),
-                )
+                self.after(0, lambda: self._download_btn.configure(state="normal", text="Download"))
 
-        threading.Thread(target=download_thread, daemon=True).start()
+        self._run_in_thread(_task)
 
-    def get_platform_info(self):
-        system = platform.system().lower()
-        machine = platform.machine().lower()
-        return system, machine
+    # ── FFmpeg install ─────────────────────────────────────────────
+    def _start_ffmpeg_download(self) -> None:
+        self._ffmpeg_btn.configure(state="disabled", text="Downloading...")
+        self._run_in_thread(self._download_ffmpeg)
 
-    def start_ffmpeg_download(self):
-        self.ffmpeg_button.state(["disabled"])
-        self.ffmpeg_button["text"] = "Downloading FFmpeg ⟳"
-        thread = threading.Thread(target=self.download_ffmpeg)
-        thread.daemon = True
-        thread.start()
-
-    def start_ytdlp_download(self):
-        self.ytdlp_button.state(["disabled"])
-        self.ytdlp_button["text"] = "Downloading yt-dlp ⟳"
-        thread = threading.Thread(target=self.download_ytdlp)
-        thread.daemon = True
-        thread.start()
-
-    def download_ffmpeg(self):
-        """
-        Process:
-        1. Determine OS and machine architecture
-        2. Set download URLs based on OS
-        3. Download FFmpeg archive file
-        4. Extract only ffmpeg and ffprobe executables
-        5. Clean up archive, empty directories and move executables to bin folder
-        6. Set proper permissions on Unix systems
-        7. Update UI with status
-        """
+    def _download_ffmpeg(self) -> None:
+        """Download and extract ffmpeg + ffprobe for the current platform."""
         try:
-            # Step 1: Determine OS and machine architecture
-            system, machine = self.get_platform_info()
+            url = FFMPEG_URLS.get(SYSTEM)
+            if url is None:
+                self._log(f"Unsupported platform for FFmpeg auto-install: {SYSTEM}")
+                return
 
-            # Step 2: Set download URLs based on OS
-            if system == "windows":
-                url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-                archive_name = "ffmpeg.zip"
-                exe_suffix = ".exe"
-            elif system == "darwin":
-                url = "https://evermeet.cx/ffmpeg/ffmpeg-5.1.zip"
-                archive_name = "ffmpeg.zip"
-                exe_suffix = ""
-            elif system == "linux":
-                url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
-                archive_name = "ffmpeg.tar.xz"
-                exe_suffix = ""
+            is_zip = url.endswith(".zip") or SYSTEM in ("windows", "darwin")
+            archive_name = "ffmpeg.zip" if is_zip else "ffmpeg.tar.xz"
+            tmp_dir = APP_DIR / "_ffmpeg_tmp"
+            tmp_dir.mkdir(exist_ok=True)
+            archive_path = tmp_dir / archive_name
 
-            # Step 3: Download FFmpeg archive file
-            response = requests.get(url, stream=True)
-            download_path = Path("./ffmpeg-download")
-            download_path.mkdir(exist_ok=True)
-            archive_path = download_path / archive_name
+            self._log("Downloading FFmpeg...")
+            _download_file(url, archive_path, progress_cb=self._set_progress)
 
-            with open(archive_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
+            self._log("Extracting FFmpeg...")
+            targets = {f"ffmpeg{EXE_SUFFIX}", f"ffprobe{EXE_SUFFIX}"}
 
-            # Step 4: Extract only ffmpeg and ffprobe executables
-            if archive_name.endswith(".zip"):
-                with zipfile.ZipFile(archive_path, "r") as zip_ref:
-                    for file in zip_ref.namelist():
-                        if file.endswith(f"ffmpeg{exe_suffix}") or file.endswith(
-                            f"ffprobe{exe_suffix}"
-                        ):
-                            zip_ref.extract(file, download_path)
-                            source = download_path / file
-                            target = Path(".") / file.split("/")[-1]
-                            source.rename(target)
-            elif archive_name.endswith(".tar.xz"):
-                with tarfile.open(archive_path, "r:xz") as tar_ref:
-                    for member in tar_ref.getmembers():
-                        if member.name.endswith("ffmpeg") or member.name.endswith(
-                            "ffprobe"
-                        ):
-                            tar_ref.extract(member, download_path)
-                            source = download_path / member.name
-                            target = Path(".") / member.name.split("/")[-1]
-                            source.rename(target)
+            if is_zip:
+                with zipfile.ZipFile(archive_path, "r") as zf:
+                    for name in zf.namelist():
+                        basename = Path(name).name
+                        if basename in targets:
+                            zf.extract(name, tmp_dir)
+                            (tmp_dir / name).rename(APP_DIR / basename)
+            else:
+                with tarfile.open(archive_path, "r:xz") as tf:
+                    for member in tf.getmembers():
+                        basename = Path(member.name).name
+                        if basename in targets:
+                            tf.extract(member, tmp_dir)
+                            (tmp_dir / member.name).rename(APP_DIR / basename)
 
-            # Step 5: Clean up archive and empty directories
-            archive_path.unlink()
-            for root, dirs, files in os.walk(download_path, topdown=False):
-                for dir in dirs:
-                    dir_path = Path(root) / dir
-                    if not any(dir_path.iterdir()):
-                        dir_path.rmdir()
-            download_path.rmdir()
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
-            # Step 6: Set proper permissions on Unix systems
-            if system != "windows":
-                os.chmod(Path(".") / "ffmpeg", 0o755)
-                os.chmod(Path(".") / "ffprobe", 0o755)
+            _set_executable(FFMPEG_BIN)
+            _set_executable(FFPROBE_BIN)
 
-            # Step 7: Update UI with status
-            self.root.after(0, lambda: self.ffmpeg_button.state(["!disabled"]))
-            self.root.after(
-                0, lambda: self.ffmpeg_button.configure(text="Download/Update FFmpeg")
-            )
-            self.root.after(
-                0,
-                lambda: messagebox.showinfo(
-                    "Success", "FFmpeg downloaded and extracted successfully!"
-                ),
-            )
+            self._log("FFmpeg installed successfully.")
+            self.after(0, self._check_tools)
 
-        except Exception as e:
-            self.root.after(0, lambda: self.ffmpeg_button.state(["!disabled"]))
-            self.root.after(
-                0, lambda: self.ffmpeg_button.configure(text="Download/Update FFmpeg")
-            )
-            self.root.after(
-                0,
-                lambda: messagebox.showerror(
-                    "Error", f"Failed to download FFmpeg: {str(e)}"
-                ),
-            )
+        except Exception as exc:
+            log.exception("FFmpeg download failed")
+            self._log(f"FFmpeg error: {exc}")
+        finally:
+            shutil.rmtree(APP_DIR / "_ffmpeg_tmp", ignore_errors=True)
+            self.after(0, lambda: self._ffmpeg_btn.configure(state="normal", text="Install / Update FFmpeg"))
 
-    def download_ytdlp(self):
-        """
-        Process:
-        1. Determine OS and machine architecture
-        2. Set download URLs based on OS
-        3. Download yt-dlp executable
-        4. Move executable to bin folder
-        5. Set proper permissions on Unix systems
-        6. Update UI with status
-        """
+    # ── yt-dlp install ─────────────────────────────────────────────
+    def _start_ytdlp_download(self) -> None:
+        self._ytdlp_btn.configure(state="disabled", text="Downloading...")
+        self._run_in_thread(self._download_ytdlp)
+
+    def _download_ytdlp(self) -> None:
+        """Download the latest yt-dlp binary for the current platform."""
         try:
-            # Step 1: Determine OS and machine architecture
-            system, machine = self.get_platform_info()
+            filename = f"yt-dlp{EXE_SUFFIX}"
+            url = f"https://github.com/yt-dlp/yt-dlp/releases/latest/download/{filename}"
 
-            # Step 2: Set download URLs based on OS
-            filename = "yt-dlp.exe" if system == "windows" else "yt-dlp"
-            url = (
-                f"https://github.com/yt-dlp/yt-dlp/releases/latest/download/{filename}"
-            )
+            tmp_dir = APP_DIR / "_ytdlp_tmp"
+            tmp_dir.mkdir(exist_ok=True)
+            tmp_file = tmp_dir / filename
 
-            # Step 3: Download yt-dlp executable
-            response = requests.get(url, stream=True)
-            download_path = Path("./yt-dlp-download")
-            download_path.mkdir(exist_ok=True)
-            temp_file = download_path / filename
+            self._log("Downloading yt-dlp...")
+            _download_file(url, tmp_file, progress_cb=self._set_progress)
 
-            with open(temp_file, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
+            target = APP_DIR / filename
+            shutil.move(str(tmp_file), str(target))
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
-            # Step 4: Move executable to bin folder
-            target_file = Path(".") / filename
-            temp_file.rename(target_file)
-            download_path.rmdir()
+            _set_executable(target)
 
-            # Step 5: Set proper permissions on Unix systems
-            if system != "windows":
-                os.chmod(target_file, 0o755)
+            self._log("yt-dlp installed successfully.")
+            self.after(0, self._check_tools)
 
-            # Step 6: Update UI with status
-            self.root.after(0, lambda: self.ytdlp_button.state(["!disabled"]))
-            self.root.after(
-                0, lambda: self.ytdlp_button.configure(text="Download/Update yt-dlp")
-            )
-            self.root.after(
-                0,
-                lambda: messagebox.showinfo(
-                    "Success", "yt-dlp downloaded successfully!"
-                ),
-            )
-
-        except Exception as e:
-            self.root.after(0, lambda: self.ytdlp_button.state(["!disabled"]))
-            self.root.after(
-                0, lambda: self.ytdlp_button.configure(text="Download/Update yt-dlp")
-            )
-            self.root.after(
-                0,
-                lambda: messagebox.showerror(
-                    "Error", f"Failed to download yt-dlp: {str(e)}"
-                ),
-            )
-
-    def run(self):
-        self.root.mainloop()
+        except Exception as exc:
+            log.exception("yt-dlp download failed")
+            self._log(f"yt-dlp error: {exc}")
+        finally:
+            shutil.rmtree(APP_DIR / "_ytdlp_tmp", ignore_errors=True)
+            self.after(0, lambda: self._ytdlp_btn.configure(state="normal", text="Install / Update yt-dlp"))
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     app = DownloaderApp()
-    app.run()
+    app.mainloop()
