@@ -1,24 +1,67 @@
-# youtube-dl_simple_mp3-vid
+# Media Downloader
 
-Downloading mp3 and video from youtube in an easy way.
+A simple GUI tool for downloading audio (MP3) and video from the web using [yt-dlp](https://github.com/yt-dlp/yt-dlp).
+
+## Features
+
+- **Modern dark/light UI** — adapts to your system theme
+- **MP3 or Video** — best audio or best video up to 1080p
+- **Live progress** — real-time progress bar and status log
+- **One-click tool install** — download yt-dlp and FFmpeg directly from the app
+- **Cross-platform** — Windows and Linux
 
 ## Requirements
 
-- Windows/Linux
-- youtube-dl <https://github.com/rg3/youtube-dl/releases>
-- yt-dlp <https://github.com/yt-dlp/yt-dlp/releases>
-- ffmpeg (for convert to mp3) <https://ffbinaries.com/downloads>
-- ffprobe ("gathers information from multimedia streams and prints it in human readable fashion") <https://ffbinaries.com/downloads>
-- Script files should be in the same folder as youtube-dl.exe and ffmpeg.exe
+- **Python 3.10+** with `tkinter` (included on Windows; on Linux install `python3-tk`)
 
-## Note
+Everything else (virtualenv, dependencies, yt-dlp, FFmpeg) is handled automatically.
 
-ffmpeg included version 3.3.2
-ffprobe included version 3.3.2
-youtube-dl included version 2019.02.18
+## Quick Start
+
+### Windows — double-click `run.bat`
+
+Or from a terminal:
+
+```cmd
+run.bat
+```
+
+### Windows — PowerShell
+
+```powershell
+.\run.ps1
+```
+
+### Linux / macOS
+
+```bash
+chmod +x run.sh
+./run.sh
+```
+
+The launcher script will:
+
+1. Create a `.venv` virtual environment (if missing)
+2. Install Python dependencies from `requirements.txt`
+3. Launch the GUI
+
+Once the app is open, use the **Install / Update** buttons at the bottom to fetch `yt-dlp` and `FFmpeg`.
+
+## Project Structure
+
+```
+├── main.py            # Application source
+├── requirements.txt   # Python dependencies
+├── run.bat            # Windows CMD launcher
+├── run.ps1            # PowerShell launcher (Windows / Linux / macOS)
+├── run.sh             # Bash launcher (Linux / macOS)
+├── LICENSE
+└── README.md
+```
 
 ## Changelog
 
-- v1.5 changed structure of windows script, fixed basic functions, added update youtbe-dl option
-- v1.1 merged scripts into one and start writing linux bash script
-- v1 separate script for video and mp3
+- **v2.0** — Full rewrite: modern CustomTkinter UI, cross-platform fixes, progress bars, live log, one-click tool install
+- **v1.5** — Changed structure of Windows script, fixed basic functions, added update yt-dlp option
+- **v1.1** — Merged scripts into one, started Linux bash script
+- **v1.0** — Separate scripts for video and MP3

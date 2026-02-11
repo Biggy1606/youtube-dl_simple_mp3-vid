@@ -1,1 +1,11 @@
-venv
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.exe
+_ffmpeg_tmp/
+_ytdlp_tmp/
+download/
+dist/
+build/
+*.spec
